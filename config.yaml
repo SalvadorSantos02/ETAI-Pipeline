@@ -12,9 +12,12 @@ split:
   random_state: 42
 
 model:
-  type: "logistic_regression"   # or "decision_tree"
+  type: "decision_tree"   # "logistic_regression" or "decision_tree"
   params:
-    max_iter: 1000
+    # NOTE: params are passed straight to the model constructor, so they must
+    # match the chosen type. logistic_regression -> max_iter; decision_tree -> max_depth.
+    max_depth: 5
+    random_state: 42
 
 output:
   results_dir: "results"   # each run's full report is saved here as a timestamped .txt file
