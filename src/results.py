@@ -21,8 +21,14 @@ def save_run(results_dir: str, config: dict, report_text: str) -> str:
     header = (
         f"Run: {timestamp}\n"
         f"Model: {config['model']['type']}  params={config['model']['params']}\n"
-        f"Test size: {config['split']['test_size']}  "
-        f"random_state: {config['split']['random_state']}\n"
+        f"Preprocessing: encoder={config.get('preprocessing', {}).get('encoder')}  "
+        f"scaler={config.get('preprocessing', {}).get('scaler')}\n"
+        f"Evaluation: {config.get('cv', {}).get('n_splits')}-fold stratified CV  "
+        f"shuffle={config.get('cv', {}).get('shuffle')}  "
+        f"random_state={config.get('cv', {}).get('random_state')}  "
+        f"scoring={config.get('cv', {}).get('scoring')}\n"
+        f"Locked test set: size={config.get('test_set', {}).get('size')}  "
+        f"random_state={config.get('test_set', {}).get('random_state')}  (set aside, never scored)\n"
         + "=" * 60 + "\n\n"
     )
 

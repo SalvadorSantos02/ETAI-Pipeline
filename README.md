@@ -28,15 +28,13 @@ See `data/README.md` for the full problem description and data dictionary.
 ├── requirements.txt
 ├── src/
 │   ├── data.py             # loading
-│   ├── data_diagnostics.py # week 3: missingness mechanism, domain rules, duplicate checks
-│   ├── preprocessing.py    # cleaning recipe + leak-safe ColumnTransformer + train/test split
+│   ├── preprocessing.py    # cleaning rules + leak-safe ColumnTransformer + the locked test split
 │   ├── model.py             # model construction
-│   ├── evaluate.py         # accuracy metrics + fairness check
+│   ├── evaluate.py         # cross-validation, out-of-fold reports + fairness check
 │   └── results.py          # saves each run's report to disk
 ├── results/                # created automatically -- one file per run (not tracked in git)
 └── data/
     ├── compas_two_year_recidivism.csv
-    ├── diagnosis_log.json   # the EDA notebook's findings, read by clean_dataset()
     └── README.md            # problem description + full data dictionary
 ```
 
@@ -78,26 +76,50 @@ anything. Worth re-checking once the model stops being a scaling-sensitive linea
 check. The grid search above also tunes preprocessing on the same splits it scores on -- a mild
 leak, acknowledged in the notebook and left until cross-validation arrives in week 4.
 
-## Best Model
+## Model evaluation
 
-| Week | Model | Preprocessing | Train acc | Test acc | Gap |
-|---|---|---|---|---|---|
-| 2 | logistic regression (`max_iter=1000`) | naive: `dropna()` + one-hot | 0.679 | **0.678** | +0.001 |
-| 2 | decision tree (`max_depth=5`) | naive | 0.680 | 0.668 | +0.012 |
-| 3 | decision tree (`max_depth=5`) | week 3 recipe: target encoding + standard scaling | 0.684 | 0.665 | +0.020 |
+Two decisions, both made once and written into `config.yaml`:
 
-**Current best: week 2's logistic regression, at 0.678 test accuracy.** Worth being honest about
-that rather than claiming the new pipeline won: better preprocessing did *not* buy accuracy here.
+**A locked test set** -- 20% of the rows, stratified, seed 42, carved out by `split_dev_test()`
+and never used to fit, tune, compare or choose anything. Changing that seed later would silently
+hand me a test set I had already partly seen, which is why the config says not to.
 
-Two reasons it is still progress. First, the two numbers are not measured on the same rows --
-week 2 dropped every row with a missing value, scoring on an easier, cleaner subset of 6,256
-rows; week 3 keeps all 7,214 and has to predict the messy ones too. Second, the fairness
-table went from 16 garbled race labels to 6 real categories, which is the difference between a
-number and a number that means something: our model's false-positive rate is now a readable 0.28
-for African-American defendants against 0.16 for Caucasian ones (COMPAS's own score: 0.44 against
-0.24). Same direction as ProPublica's finding, with `race` never once a feature.
+**Stratified 5-fold cross-validation of the whole pipeline** on the remaining 5,771 development
+rows. The preprocessor sits *inside* the pipeline, so every fold re-learns its own medians,
+category statistics and scale from its own training rows -- the validation fold never influences
+its own preprocessing. Same `cv.random_state` for every model, so the comparison is like-for-like.
+Reports are computed on out-of-fold predictions: every row is scored by the one fold model that
+did not train on it.
 
-A fair comparison between the two needs cross-validation on a common footing -- week 4's job.
+| Model | Holdout accuracy (W3) | CV accuracy (mean ± std) | CV train–val gap |
+|---|---|---|---|
+| Dummy (majority class) | — | 0.549 ± 0.000 | −0.000 |
+| Logistic regression | 0.678 | 0.672 ± 0.013 | +0.003 |
+| Decision tree (`max_depth=5`) | 0.665 | **0.675 ± 0.018** | +0.011 |
+| Random forest (300 trees, untuned) | — | 0.650 ± 0.018 | +0.083 |
+
+**Which number would I trust?** The CV one. A single holdout score is one draw: week 3's decision
+tree scored 0.665 on one split and 0.675 across five, and the ±0.018 spread says that difference
+is the split talking, not the model. The CV figure comes with an error bar, which is the whole
+point.
+
+**Does the week 2/3 conclusion still hold?** No, and it never had the evidence to. I concluded
+week 2's logistic regression was best on 0.678 vs 0.665 -- a gap of 0.013, which is smaller than
+a single standard deviation of either model's fold scores. Under CV, logistic regression (0.672)
+and the decision tree (0.675) are indistinguishable; neither is "the best model", and picking one
+on the old numbers would have been reading noise.
+
+Two things the table makes visible that no previous week could. The **dummy** floor is 0.549 --
+the share of the majority class -- so every real model is buying about 12 accuracy points over
+guessing, which is modest and worth knowing. And the **random forest**, the most powerful model
+here, is the *worst* at 0.650 with a +0.083 train-validation gap: 300 untuned trees memorise the
+development set and generalise no better for it. The gap column is doing exactly the job it was
+added for.
+
+**Fairness, out-of-fold on the development set:** our model's false-positive rate is 0.36 for
+African-American defendants against 0.23 for Caucasian ones (COMPAS's own score: 0.45 against
+0.23). Same direction as ProPublica's finding, on 5,771 rows instead of 1,443, with `race` never
+a feature.
 
 ## Environment setup
 
@@ -151,24 +173,43 @@ That's it -- activate, then run. If you don't see `(venv)` at the start of your 
 
 ## Running the pipeline
 
-With the environment active (see above), from the project's root
-folder, on any OS:
+With the environment active (see above), from the project's root folder, on any OS:
 ```bash
 python main.py
 ```
 
-This loads `config.yaml`, loads and preprocesses the data, trains the model, and prints:
-- **train accuracy and test accuracy, side by side.** Comparing the two is how you catch overfitting: if the model looks much better on the data it was trained on than on data it's never seen, it has memorised rather than learned something that generalises. 
-- a classification report on the test set
-- a false-positive-rate-by-race comparison between our model and
-  COMPAS's own score
+This loads `config.yaml`, cleans the data, sets the locked test set aside, cross-validates the
+pipeline on the development set, and prints:
+- the **per-fold table** -- train and validation score for each of the 5 folds, plus the gap
+  between them, and the mean +/- std of each column. A large, consistent gap is overfitting.
+- a **classification report on the out-of-fold predictions**, so every development row is scored
+  by a model that never trained on it
+- a **false-positive-rate-by-race comparison** between our model and COMPAS's own score, on those
+  same out-of-fold predictions
 
-All of this is also saved to a timestamped file in `results/` (e.g.`results/run_20260916_143012.txt`), so it doesn't just scroll past in your terminal -- open it later, or change something in `config.yaml` (like the model type) and compare the new file to the last one.
-`results/` is created automatically the first time you run the
-pipeline, and isn't tracked in git (see `.gitignore`) since it's
-generated output, not source.
+It then refits the pipeline on the whole development set -- cross-validation estimates how good
+the *recipe* is and throws its five models away; this last fit is the model you would actually
+use. The locked test set is never scored.
 
-You're free to improve on this structure or restructure it entirely -- what matters is that your project stays runnable end-to-end with a single command, and that each piece (data, preprocessing, model, evaluation) stays easy to find and change independently.
+All of this is also saved to a timestamped file in `results/` (e.g. `results/run_20261003_191844.txt`),
+so it doesn't just scroll past in your terminal -- open it later, or change something in
+`config.yaml` (like the model type) and compare the new file to the last one. `results/` is
+created automatically the first time you run the pipeline, and isn't tracked in git (see
+`.gitignore`) since it's generated output, not source.
+
+To reproduce the model comparison table above, switch `model.type` in `config.yaml` between
+`dummy`, `logistic_regression`, `decision_tree` and `random_forest` (the matching `params` are
+commented there) and run `python main.py` for each.
+
+### A note on scikit-learn versions
+
+`02_preprocessing.ipynb` builds the target encoder as
+`TargetEncoder(target_type="binary", cv=StratifiedKFold(5, shuffle=True, random_state=seed))`,
+which needs scikit-learn >= 1.9. The newest release currently installable here is 1.7.2, where
+`TargetEncoder` takes `cv`, `shuffle` and `random_state` directly and builds the stratified folds
+itself for a binary target. `src/preprocessing.py` uses that form -- same cross-fitting, same
+seed, so a row's own label never reaches its own encoding. Worth reverting to the notebook's
+one-liner once 1.9 is available.
 
 ## Dataset
 

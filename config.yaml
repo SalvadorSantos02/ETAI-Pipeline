@@ -1,53 +1,82 @@
-# Baseline pipeline configuration.
-# Nothing here is hardcoded in the source files below -- everything tunable lives in this one place.
+# Pipeline configuration.
+# Nothing here is hardcoded in the source files -- everything tunable lives in this one place.
 
 data:
   path: "data/compas_two_year_recidivism.csv"
   target: "two_year_recid"
   sensitive_attr: "race"          # excluded from model features, used only to audit fairness
-  drop_columns: ["id", "decile_score", "score_text", "prior_offenses", "age_in_months", "juvenile_total"]
-  # identifiers / COMPAS's own score / the three redundant columns found via correlation + VIF
-  diagnosis_path: "data/diagnosis_log.json"   # the EDA notebook's findings, read by clean_dataset
+  drop_columns: ["id", "decile_score", "score_text"]  # identifiers / COMPAS's own score, not our model's inputs
 
 diagnostics:
-  # Week 3. Keeps src/data_diagnostics.py generic -- the module knows the techniques,
-  # this section knows the dataset.
-  candidate_predictors: ["sex", "race", "age_cat", "c_charge_degree", "score_text"]
+  # Week 3's diagnosis, written down as cleaning rules. clean_dataset() reads this section;
+  # the module knows the techniques, this section knows the dataset.
+  placeholder_tokens: ["", "-", "?", "N/A", "NA", "n/a", "na", "nan"]
+  # "nan" is in that list deliberately (week 4 fix): the category cleanup converts columns to
+  # text before mapping, which turns a genuine NaN into the string "nan" -- a fake category that
+  # would never be imputed or flagged. 229 c_charge_degree gaps were being lost this way.
+  numeric_text_columns: ["priors_count", "prior_offenses"]  # load as text purely because of placeholders
   validity_rules:
-    age: "18 <= age <= 100"
-    decile_score: "1 <= decile_score <= 10"
-    juv_fel_count: "juv_fel_count >= 0"
-    priors_count: "0 <= priors_count <= 60"
+    age: {min: 18, max: 100}
+    decile_score: {min: 1, max: 10}
+    juv_fel_count: {min: 0}
+    priors_count: {min: 0, max: 60}
+  canonical_categories:
+    sex: {male: "Male", female: "Female"}
+    race:
+      african-american: "African-American"
+      african american: "African-American"
+      caucasian: "Caucasian"
+      hispanic: "Hispanic"
+      other: "Other"
+      asian: "Asian"
+      native american: "Native American"
+    c_charge_degree: {f: "F", felony: "F", m: "M", misdemeanor: "M"}
+    score_text: {low: "Low", medium: "Medium", high: "High"}
+  redundant_columns: ["prior_offenses", "age_in_months", "juvenile_total"]  # r = 1.00 / caught by VIF
   id_column: "id"
 
 preprocessing:
-  # Week 3. Encoder/scaler pair chosen empirically: all 16 combinations scored with logistic
-  # regression over 15 repeated 75/25 splits (see 02_preprocessing.ipynb, Step 4).
-  # target + standard won at 0.6693 mean accuracy, but a paired comparison against the
-  # runner-up (target + robust, also 0.6693) gives a difference of +0.0000 with SE 0.0002 --
-  # within noise. The grid still picks one so the pipeline has a single answer.
+  # Encoder/scaler chosen by hand (week 4). Target encoding: compact and informative for the
+  # categorical columns. Robust scaling: median/IQR, so the few extreme counts don't set the scale.
+  # The alternatives (onehot/ordinal/count, none/standard/minmax) are one config change away.
   encoder: "target"
-  scaler: "standard"
+  scaler: "robust"
+  random_state: 42        # the target encoder's internal cross-fitting folds
+  numeric_features: ["age", "juv_fel_count", "juv_misd_count", "juv_other_count", "priors_count"]
+  categorical_features: ["sex", "age_cat", "c_charge_degree"]
+  mnar_indicator_sources: ["priors_count", "c_charge_degree"]   # MNAR -> fill AND flag
   imputation:
-    # MCAR columns: simple fill, nothing to preserve. MNAR columns: fill AND flag, so the
-    # model can still see that the value was missing (the flag is added before imputation).
-    age: {strategy: median, indicator: false}
-    juv_fel_count: {strategy: median, indicator: false}
-    race: {strategy: most_frequent, indicator: false}
-    sex: {strategy: most_frequent, indicator: false}
-    priors_count: {strategy: median, indicator: true}
-    c_charge_degree: {strategy: most_frequent, indicator: true}
+    numeric_strategy: "median"
+    categorical_strategy: "most_frequent"
 
-split:
-  test_size: 0.2
+test_set:
+  # Week 4: the FINAL TEST SET. Carved out once, stratified, and locked: never used to fit,
+  # tune, compare or choose anything. Used only for the final assessment.
+  # Do not change these two values after week 4 -- a new seed would silently give you a
+  # different (already partly "seen") test set.
+  size: 0.2
   random_state: 42
 
+cv:
+  # Week 4: how models are evaluated -- stratified k-fold cross-validation on the
+  # development set (everything except the locked test set). Same random_state = same folds on
+  # every run, for every model, so comparisons are like-for-like.
+  n_splits: 5
+  shuffle: true
+  random_state: 42
+  scoring: "accuracy"   # one metric for now, so numbers compare directly with weeks 2-3
+  n_jobs: 1             # folds fitted in parallel; -1 = all cores (only pays off for slow models, e.g. random forest)
+
 model:
-  type: "decision_tree"   # "logistic_regression" or "decision_tree"
+  type: "random_forest"   # "dummy" | "logistic_regression" | "decision_tree" | "random_forest"
   params:
-    # logistic_regression -> max_iter; decision_tree -> max_depth.
-    max_depth: 5
+    # params are passed straight to the model constructor, so they must match the chosen type.
+    # logistic_regression -> max_iter: 2000
+    # decision_tree       -> max_depth: 5, random_state: 42
+    # dummy               -> {} (predicts the majority class; the floor every model must beat)
+    n_estimators: 300
     random_state: 42
+    n_jobs: -1
 
 output:
   results_dir: "results"   # each run's full report is saved here as a timestamped .txt file
