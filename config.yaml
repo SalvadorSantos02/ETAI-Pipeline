@@ -7,6 +7,17 @@ data:
   sensitive_attr: "race"          # excluded from model features, used only to audit fairness
   drop_columns: ["id", "decile_score", "score_text"]  # identifiers / COMPAS's own score, not our model's inputs
 
+diagnostics:
+  # Week 3. Keeps src/data_diagnostics.py generic -- the module knows the techniques,
+  # this section knows the dataset.
+  candidate_predictors: ["sex", "race", "age_cat", "c_charge_degree", "score_text"]
+  validity_rules:
+    age: "18 <= age <= 100"
+    decile_score: "1 <= decile_score <= 10"
+    juv_fel_count: "juv_fel_count >= 0"
+    priors_count: "0 <= priors_count <= 60"
+  id_column: "id"
+
 split:
   test_size: 0.2
   random_state: 42
@@ -14,8 +25,7 @@ split:
 model:
   type: "decision_tree"   # "logistic_regression" or "decision_tree"
   params:
-    # NOTE: params are passed straight to the model constructor, so they must
-    # match the chosen type. logistic_regression -> max_iter; decision_tree -> max_depth.
+    # logistic_regression -> max_iter; decision_tree -> max_depth.
     max_depth: 5
     random_state: 42
 
