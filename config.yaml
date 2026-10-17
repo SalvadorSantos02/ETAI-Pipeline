@@ -68,15 +68,20 @@ cv:
   n_jobs: 1             # folds fitted in parallel; -1 = all cores (only pays off for slow models, e.g. random forest)
 
 model:
-  # Week 5: the decision tree again -- the model whose hyperparameters matter most. No max_depth
-  # here any more: with tuning on, the search below chooses it.
-  type: "decision_tree"   # "dummy" | "logistic_regression" | "decision_tree" | "random_forest"
+  # Week 6: the random forest is the model main.py runs; the other ensembles are one swap away.
+  # With tuning on, the search below chooses the tree size, so it isn't set here.
+  type: "random_forest"   # dummy | logistic_regression | decision_tree | random_forest | oblique_random_forest | adaboost
   params:
-    # params are passed straight to the model constructor, so they must match the chosen type.
-    # logistic_regression -> max_iter: 2000
-    # random_forest       -> n_estimators: 300, random_state: 42, n_jobs: -1
-    # dummy               -> {} (predicts the majority class; the floor every model must beat)
+    # params are passed straight to the model builder, so they must match the chosen type.
+    n_estimators: 200       # more trees never overfit, they only cost time -- fixed, not tuned
     random_state: 42
+    n_jobs: -1              # -1 = all CPU cores
+  # Other models' params, to swap in:
+  # dummy:                  {} (predicts the majority class; the floor every model must beat)
+  # decision_tree:          {random_state: 42}
+  # logistic_regression:    {max_iter: 2000}
+  # oblique_random_forest:  {n_estimators: 200, n_components: 10, random_state: 42, n_jobs: -1}
+  # adaboost:               {max_depth: 1, n_estimators: 200, learning_rate: 1.0, random_state: 42}
 
 tuning:
   # Week 5: hyperparameter tuning with Optuna (seeded TPE sampler), development set only. Every
@@ -87,7 +92,8 @@ tuning:
   n_splits: 5                                       # folds that score each candidate
   random_state: 42                                  # seeds the sampler and those folds
   # Keys are Pipeline parameter names. Types: int / float (low, high, log) or categorical (choices).
-  # Only the space matching model.type is used.
+  # Only the space matching model.type is used. Ensembles take minutes per run (900 fits):
+  # use a small n_trials, or enabled: false, while testing.
   search_spaces:
     decision_tree:
       model__max_depth: {type: int, low: 1, high: 20}
@@ -96,12 +102,23 @@ tuning:
     # Challenge 1: C is the inverse regularisation strength (smaller = stronger), so a log scale
     logistic_regression:
       model__C: {type: float, low: 0.0001, high: 100, log: true}
-    # Challenge 2: every trial is ~100x a tree's cost -- set n_trials: 15 and cv.n_jobs: -1 to run it
+    # Week 6: tree size and decorrelation (max_features 1.0 = plain bagging); n_estimators is
+    # fixed in model.params -- more trees never overfit
     random_forest:
-      model__n_estimators: {type: int, low: 50, high: 300}
-      model__max_depth: {type: categorical, choices: [null, 3, 5, 8, 12, 20]}
+      model__max_depth: {type: int, low: 2, high: 30}
       model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
-      model__max_features: {type: categorical, choices: ["sqrt", "log2", 0.5, 1.0]}
+      model__max_features: {type: categorical, choices: ["sqrt", 0.5, 1.0]}
+    # the same tree size, one level deeper (BaggingClassifier -> Pipeline -> tree), and how many
+    # random directions each tree may split on (at most the 10 features)
+    oblique_random_forest:
+      model__estimator__tree__max_depth: {type: int, low: 2, high: 30}
+      model__estimator__tree__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__estimator__project__n_components: {type: int, low: 3, high: 10}
+    # how weak the base trees are, and rounds x learning rate (they trade off, so tuned together)
+    adaboost:
+      model__estimator__max_depth: {type: int, low: 1, high: 8}
+      model__n_estimators: {type: int, low: 25, high: 400, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 1.0, log: true}
 
 output:
   results_dir: "results"   # each run's full report is saved here as a timestamped .txt file

@@ -29,7 +29,7 @@ See `data/README.md` for the full problem description and data dictionary.
 ├── src/
 │   ├── data.py             # loading
 │   ├── preprocessing.py    # cleaning rules + leak-safe ColumnTransformer + the locked test split
-│   ├── model.py            # model construction + build_pipeline() (preprocessing + model, one estimator)
+│   ├── model.py            # model registry (incl. oblique forest, AdaBoost) + build_pipeline() (preprocessing + model)
 │   ├── evaluate.py         # cross-validation, out-of-fold reports + fairness check
 │   ├── tuning.py           # Optuna tuning, nested cross-validation, tuning report
 │   └── results.py          # saves each run's report to disk
@@ -49,6 +49,7 @@ This table is updated after each practical class, so you can always see what cha
 | 3 | EDA + preprocessing -- diagnose the data, then fix it | `src/data_diagnostics.py` (missingness-mechanism test via chi-square + Cramer's V, domain-rule invalid-value detection, duplicate check done two ways) and a rewritten `src/preprocessing.py` (fit-free `clean_dataset()`, `_was_missing` indicators for the MNAR columns, a leak-safe `ColumnTransformer` built by `build_preprocessor()`, and the split) replace week 2's naive `dropna()` / `get_dummies()`. The encoder/scaler pair was chosen empirically over 15 repeated splits rather than by convention; three redundant columns dropped; `config.yaml` gains `diagnostics` and `preprocessing` sections, and `main.py` now fits preprocessor and model as **one** `Pipeline`, so nothing is fitted outside the training rows |
 | 4 | Preprocessing review + cross-validation | A locked 20% test set (`split_dev_test()`, stratified, seed 42, never scored) and stratified 5-fold CV of the whole pipeline on the development set (`src/evaluate.py`): per-fold train/validation/gap, out-of-fold classification and fairness reports. `clean_dataset()` became row-preserving, de-duplication moved to a training-only `drop_duplicate_rows()`, and `src/data_diagnostics.py` was folded into preprocessing; random forest added as a model |
 | 5 | CV & hyperparameter tuning | `src/tuning.py` (new): `tune_pipeline()` runs a seeded Optuna TPE study where every trial cross-validates the whole pipeline on the same folds; `nested_cross_validate()` gives the honest estimate of "tune, then refit"; `tuning_report()` prints the top trials and the optimism check. `build_pipeline()` in `src/model.py` is now the one place the estimator is assembled. `config.yaml` gains a `tuning` section (on/off, trials, folds, seed, one search space per model) and the model is the decision tree again; `optuna` added to requirements |
+| 6 | Ensembles in depth -- random forest, oblique random forest, AdaBoost | `src/model.py` gains two model builders, registered in `_MODELS` next to the classes: `oblique_random_forest()` (a `BaggingClassifier` of `SparseRandomProjection` -> `DecisionTreeClassifier` pipelines, so every split is a random hyperplane, a new set of directions per tree) and `adaboost()` (`AdaBoostClassifier` over trees of a chosen depth). `config.yaml`: the random forest is the model `main.py` runs (200 trees, fixed), and `tuning.search_spaces` has one space per ensemble -- tree size and `max_features` for the forest (no longer `n_estimators`), the same tree size through `model__estimator__tree__...` plus `n_components` for the oblique forest, base-tree depth, rounds and learning rate for AdaBoost. No other file and no package changed |
 
 ## Preprocessing decisions
 
@@ -160,6 +161,41 @@ trial, because nested CV is the only one of the two that was scored on rows that
 choosing it. The forest picked a deeper `max_depth` (8) than the lone tree (6): averaging many
 decorrelated trees cancels part of each tree's variance, so each one can afford to grow further.
 
+### Ensembles
+
+Week 6 adds the oblique random forest and AdaBoost, and re-tunes the random forest with a new search
+space (tree size and `max_features`; `n_estimators` fixed at 200 because more trees never overfit,
+they only cost time). Every row comes from `python main.py` with that `model.type`, tuning on (30
+Optuna trials x 5 inner folds, nested over the same 5 outer folds), on the same development set
+and folds as every week since week 4.
+
+| Model | Default: CV mean ± std (gap) | Tuned: nested CV mean ± std (gap) | Tuning score (best trial) | Chosen hyperparameters |
+|---|---|---|---|---|
+| Logistic regression | 0.672 ± 0.013 (+0.003) | — | — | — |
+| Decision tree | 0.610 ± 0.018 (+0.085) | 0.672 ± 0.017 (+0.013) | 0.679 | `max_depth=6`, `min_samples_leaf=101`, `criterion=gini` |
+| Random forest | 0.650 ± 0.019 (+0.082) | 0.681 ± 0.015 (+0.009) | 0.683 | `max_depth=22`, `min_samples_leaf=42`, `max_features=0.5` |
+| Oblique random forest | 0.647 ± 0.011 (+0.114) | 0.681 ± 0.013 (+0.012) | 0.683 | `max_depth=6`, `min_samples_leaf=3`, `n_components=5` |
+| AdaBoost | 0.676 ± 0.012 (+0.006) | **0.682 ± 0.017** (+0.004) | 0.684 | base `max_depth=4`, `n_estimators=220`, `learning_rate=0.025` |
+
+Defaults: `max_iter=2000` for LR, `random_state` only for the tree (fully grown), 200 fully grown
+trees for both forests (`n_components=10` for the oblique one), 200 stumps at `learning_rate=1.0`
+for AdaBoost. Run times with tuning on, on a laptop: about 15-20 minutes per ensemble (900 fits).
+
+I would choose AdaBoost, but only just: its nested 0.682 is ahead of the random forest by +0.001
+and of the oblique forest by +0.001 on average, with folds going both ways, so the three tuned
+ensembles are tied. Against last week's models they gain about one point (+0.010 over both the
+tuned tree and logistic regression), which is smaller than the fold-to-fold std of ~0.015, so it is
+not yet a convincing lead. The chosen hyperparameters do match how each model works: AdaBoost picked
+weak base trees (depth 4, against the fully grown trees the forests start from) and paired many
+rounds with a small learning rate, the two knobs that trade off; the random forest kept its trees
+deep (`max_depth=22`) but stopped them at leaves of ~40 people, so averaging handles the variance
+while the leaf size keeps every tree from memorising the identical noisy rows all trees share; the
+oblique forest got to the same place with shallower trees on 5 random directions. Tuning mattered
+most where the defaults overfit -- both forests' gaps of +0.08 / +0.11 dropped to about +0.01 --
+and least for AdaBoost with stumps, which was already well behaved. I would report **AdaBoost,
+0.682 ± 0.017 from nested CV**, not the 0.684 of its best trial; that all five models end between
+0.672 and 0.682 says the ceiling is the information in these 10 features, not the model.
+
 ## Environment setup
 
 You only need to do this once per machine.
@@ -231,8 +267,8 @@ table and the classification report, the **nested CV table** (one row per outer 
 hyperparameters chosen in it) and the **tuning report** (best hyperparameters, top 5 trials and the
 optimism check). The classification and fairness reports then use the nested out-of-fold
 predictions, and the final refit uses the tuned hyperparameters. With `enabled: false` the run is
-exactly week 4's. The decision tree takes under a minute; the random forest a few minutes, so for
-it set `tuning.n_trials: 15` and `cv.n_jobs: -1`.
+exactly week 4's. The decision tree takes under a minute; each ensemble 15-20 minutes (900 fits), so while
+testing set `tuning.n_trials: 5` or `tuning.enabled: false`.
 
 It then refits the pipeline on the whole development set -- cross-validation estimates how good
 the *recipe* is and throws its five models away; this last fit is the model you would actually
@@ -245,8 +281,8 @@ created automatically the first time you run the pipeline, and isn't tracked in 
 `.gitignore`) since it's generated output, not source.
 
 To reproduce the model comparison table above, switch `model.type` in `config.yaml` between
-`dummy`, `logistic_regression`, `decision_tree` and `random_forest` (the matching `params` are
-commented there) and run `python main.py` for each.
+`dummy`, `logistic_regression`, `decision_tree`, `random_forest`, `oblique_random_forest` and
+`adaboost` (the matching `params` are commented there) and run `python main.py` for each.
 
 ### A note on scikit-learn versions
 
