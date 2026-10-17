@@ -29,8 +29,9 @@ See `data/README.md` for the full problem description and data dictionary.
 ├── src/
 │   ├── data.py             # loading
 │   ├── preprocessing.py    # cleaning rules + leak-safe ColumnTransformer + the locked test split
-│   ├── model.py             # model construction
+│   ├── model.py            # model construction + build_pipeline() (preprocessing + model, one estimator)
 │   ├── evaluate.py         # cross-validation, out-of-fold reports + fairness check
+│   ├── tuning.py           # Optuna tuning, nested cross-validation, tuning report
 │   └── results.py          # saves each run's report to disk
 ├── results/                # created automatically -- one file per run (not tracked in git)
 └── data/
@@ -46,6 +47,8 @@ This table is updated after each practical class, so you can always see what cha
 |------|------------------------|------------------------|
 | 2 | Introduction & baseline pipeline | Initial version: project structure, a single naive train/test split (no cross-validation), minimal preprocessing (drop rows with missing values, one-hot encode categoricals), logistic regression baseline, a first (deliberately simple) fairness check comparing our model's and COMPAS's own false-positive rate by race, train-vs-test accuracy reporting (to start spotting overfitting), and each run's full report saved automatically to `results/` |
 | 3 | EDA + preprocessing -- diagnose the data, then fix it | `src/data_diagnostics.py` (missingness-mechanism test via chi-square + Cramer's V, domain-rule invalid-value detection, duplicate check done two ways) and a rewritten `src/preprocessing.py` (fit-free `clean_dataset()`, `_was_missing` indicators for the MNAR columns, a leak-safe `ColumnTransformer` built by `build_preprocessor()`, and the split) replace week 2's naive `dropna()` / `get_dummies()`. The encoder/scaler pair was chosen empirically over 15 repeated splits rather than by convention; three redundant columns dropped; `config.yaml` gains `diagnostics` and `preprocessing` sections, and `main.py` now fits preprocessor and model as **one** `Pipeline`, so nothing is fitted outside the training rows |
+| 4 | Preprocessing review + cross-validation | A locked 20% test set (`split_dev_test()`, stratified, seed 42, never scored) and stratified 5-fold CV of the whole pipeline on the development set (`src/evaluate.py`): per-fold train/validation/gap, out-of-fold classification and fairness reports. `clean_dataset()` became row-preserving, de-duplication moved to a training-only `drop_duplicate_rows()`, and `src/data_diagnostics.py` was folded into preprocessing; random forest added as a model |
+| 5 | CV & hyperparameter tuning | `src/tuning.py` (new): `tune_pipeline()` runs a seeded Optuna TPE study where every trial cross-validates the whole pipeline on the same folds; `nested_cross_validate()` gives the honest estimate of "tune, then refit"; `tuning_report()` prints the top trials and the optimism check. `build_pipeline()` in `src/model.py` is now the one place the estimator is assembled. `config.yaml` gains a `tuning` section (on/off, trials, folds, seed, one search space per model) and the model is the decision tree again; `optuna` added to requirements |
 
 ## Preprocessing decisions
 
@@ -121,6 +124,42 @@ African-American defendants against 0.23 for Caucasian ones (COMPAS's own score:
 0.23). Same direction as ProPublica's finding, on 5,771 rows instead of 1,443, with `race` never
 a feature.
 
+### Hyperparameter tuning
+
+`src/tuning.py` tunes with **Optuna**: a TPE sampler seeded from `tuning.random_state`, 30 trials
+(15 for the random forest, which is ~100x slower per trial), each trial scored by 5-fold stratified
+CV. The search space lives in `config.yaml`, one per model type, keyed by Pipeline parameter names
+(`model__max_depth`, `model__C`, ...). It doesn't leak, for three reasons: it only ever sees the
+development set (the test set stays locked); every trial clones the **whole** pipeline, so the
+imputer, encoder and scaler are re-fit inside every fold of every trial; and every trial uses the
+same folds, so candidates are compared like-for-like. The best trial's score is still the maximum
+of many noisy numbers, so it is never the reported one: **nested CV** (tuning re-run from scratch
+inside each of the 5 outer folds, scored on the outer fold it never saw) gives the honest estimate,
+and the hyperparameters kept come from one more tuning run on all development rows.
+
+| Model | Default: CV mean ± std | Tuned: nested CV mean ± std | Tuning score (best trial) | Optimism | Chosen hyperparameters |
+|---|---|---|---|---|---|
+| Decision tree | 0.610 ± 0.018 (fully grown) | 0.672 ± 0.017 | 0.679 | +0.002 | `max_depth=6`, `min_samples_leaf=101`, `criterion=gini` |
+| Logistic regression | 0.672 ± 0.013 | 0.673 ± 0.016 | 0.678 | +0.002 | `C=0.072` |
+| Random forest | 0.650 ± 0.018 (300 trees) | **0.679 ± 0.013** | 0.683 | +0.002 | `n_estimators=128`, `max_depth=8`, `min_samples_leaf=36`, `max_features=0.5` |
+
+Optimism = mean tuning score inside the outer folds (`inner_best`) minus the mean honest score on
+them. Default means `random_state` only for the tree, `max_iter=2000` for LR, 300 trees for the
+forest; week 4's tree had a hand-picked `max_depth=5`.
+
+The two tree models gained the most, and their gains are well beyond the fold-to-fold noise: the
+tree went from 0.610 to 0.672 (+0.062, more than three standard deviations), the forest from 0.650
+to 0.679 (+0.029), and in both the train-validation gap collapsed from about +0.08 to +0.01 --
+tuning bought them a brake on memorising, which is what their defaults lacked. Logistic regression
+gained +0.001, which is nothing: it was never overfitting (gap +0.003), and `C` only adjusts a
+model with ten coefficients that was already about as simple as the data allows. Tuning did
+change the ranking on paper -- the forest moves from worst to first -- but the three tuned models
+sit within 0.007 of each other, less than one fold standard deviation, so they are effectively
+tied. For the forest I would report **0.679 ± 0.013 from nested CV**, not the 0.683 of its best
+trial, because nested CV is the only one of the two that was scored on rows that took no part in
+choosing it. The forest picked a deeper `max_depth` (8) than the lone tree (6): averaging many
+decorrelated trees cancels part of each tree's variance, so each one can afford to grow further.
+
 ## Environment setup
 
 You only need to do this once per machine.
@@ -186,6 +225,14 @@ pipeline on the development set, and prints:
   by a model that never trained on it
 - a **false-positive-rate-by-race comparison** between our model and COMPAS's own score, on those
   same out-of-fold predictions
+
+With `tuning.enabled: true` (the default since week 5) it also prints, between the first CV
+table and the classification report, the **nested CV table** (one row per outer fold, with the
+hyperparameters chosen in it) and the **tuning report** (best hyperparameters, top 5 trials and the
+optimism check). The classification and fairness reports then use the nested out-of-fold
+predictions, and the final refit uses the tuned hyperparameters. With `enabled: false` the run is
+exactly week 4's. The decision tree takes under a minute; the random forest a few minutes, so for
+it set `tuning.n_trials: 15` and `cv.n_jobs: -1`.
 
 It then refits the pipeline on the whole development set -- cross-validation estimates how good
 the *recipe* is and throws its five models away; this last fit is the model you would actually

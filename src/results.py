@@ -18,6 +18,9 @@ def save_run(results_dir: str, config: dict, report_text: str) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(results_dir, f"run_{timestamp}.txt")
 
+    tuning = config.get("tuning", {})
+    tuning_line = (f"Optuna, {tuning['n_trials']} trials x {tuning['n_splits']} folds, nested CV  "
+                   f"random_state={tuning['random_state']}" if tuning.get("enabled") else "off")
     header = (
         f"Run: {timestamp}\n"
         f"Model: {config['model']['type']}  params={config['model']['params']}\n"
@@ -27,6 +30,7 @@ def save_run(results_dir: str, config: dict, report_text: str) -> str:
         f"shuffle={config.get('cv', {}).get('shuffle')}  "
         f"random_state={config.get('cv', {}).get('random_state')}  "
         f"scoring={config.get('cv', {}).get('scoring')}\n"
+        f"Tuning: {tuning_line}\n"
         f"Locked test set: size={config.get('test_set', {}).get('size')}  "
         f"random_state={config.get('test_set', {}).get('random_state')}  (set aside, never scored)\n"
         + "=" * 60 + "\n\n"

@@ -68,15 +68,40 @@ cv:
   n_jobs: 1             # folds fitted in parallel; -1 = all cores (only pays off for slow models, e.g. random forest)
 
 model:
-  type: "random_forest"   # "dummy" | "logistic_regression" | "decision_tree" | "random_forest"
+  # Week 5: the decision tree again -- the model whose hyperparameters matter most. No max_depth
+  # here any more: with tuning on, the search below chooses it.
+  type: "decision_tree"   # "dummy" | "logistic_regression" | "decision_tree" | "random_forest"
   params:
     # params are passed straight to the model constructor, so they must match the chosen type.
     # logistic_regression -> max_iter: 2000
-    # decision_tree       -> max_depth: 5, random_state: 42
+    # random_forest       -> n_estimators: 300, random_state: 42, n_jobs: -1
     # dummy               -> {} (predicts the majority class; the floor every model must beat)
-    n_estimators: 300
     random_state: 42
-    n_jobs: -1
+
+tuning:
+  # Week 5: hyperparameter tuning with Optuna (seeded TPE sampler), development set only. Every
+  # candidate is the whole pipeline, scored by CV on the same folds; nested CV gives the honest
+  # number. enabled: false = exactly the week 4 pipeline.
+  enabled: true
+  n_trials: 30
+  n_splits: 5                                       # folds that score each candidate
+  random_state: 42                                  # seeds the sampler and those folds
+  # Keys are Pipeline parameter names. Types: int / float (low, high, log) or categorical (choices).
+  # Only the space matching model.type is used.
+  search_spaces:
+    decision_tree:
+      model__max_depth: {type: int, low: 1, high: 20}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__criterion: {type: categorical, choices: ["gini", "entropy"]}
+    # Challenge 1: C is the inverse regularisation strength (smaller = stronger), so a log scale
+    logistic_regression:
+      model__C: {type: float, low: 0.0001, high: 100, log: true}
+    # Challenge 2: every trial is ~100x a tree's cost -- set n_trials: 15 and cv.n_jobs: -1 to run it
+    random_forest:
+      model__n_estimators: {type: int, low: 50, high: 300}
+      model__max_depth: {type: categorical, choices: [null, 3, 5, 8, 12, 20]}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__max_features: {type: categorical, choices: ["sqrt", "log2", 0.5, 1.0]}
 
 output:
   results_dir: "results"   # each run's full report is saved here as a timestamped .txt file
