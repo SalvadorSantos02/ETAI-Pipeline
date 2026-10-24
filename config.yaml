@@ -64,24 +64,28 @@ cv:
   n_splits: 5
   shuffle: true
   random_state: 42
-  scoring: "accuracy"   # one metric for now, so numbers compare directly with weeks 2-3
+  # Week 7: reported for every run. fbeta_<beta> weights recall beta times as much as precision.
+  metrics: ["accuracy", "balanced_accuracy", "precision", "recall", "f1", "fbeta_2", "roc_auc", "average_precision"]
+  selection_metric: "roc_auc"   # one of metrics: what tuning maximises and runs are ranked by
   n_jobs: 1             # folds fitted in parallel; -1 = all cores (only pays off for slow models, e.g. random forest)
 
 model:
-  # Week 6: the random forest is the model main.py runs; the other ensembles are one swap away.
-  # With tuning on, the search below chooses the tree size, so it isn't set here.
-  type: "random_forest"   # dummy | logistic_regression | decision_tree | random_forest | oblique_random_forest | adaboost
+  # Week 7: gradient boosting is the model main.py runs; every other model is one swap away.
+  type: "gradient_boosting"   # dummy | logistic_regression | naive_bayes | decision_tree | random_forest | oblique_random_forest | adaboost | gradient_boosting | hist_gradient_boosting
   params:
     # params are passed straight to the model builder, so they must match the chosen type.
-    n_estimators: 200       # more trees never overfit, they only cost time -- fixed, not tuned
     random_state: 42
-    n_jobs: -1              # -1 = all CPU cores
-  # Other models' params, to swap in:
+  # Other models' params, to swap in. class_weight "balanced" weights each class by 1 / its frequency
+  # (GradientBoostingClassifier and GaussianNB have no class_weight).
   # dummy:                  {} (predicts the majority class; the floor every model must beat)
-  # decision_tree:          {random_state: 42}
-  # logistic_regression:    {max_iter: 2000}
+  # logistic_regression:    {max_iter: 2000, class_weight: balanced}
+  # naive_bayes:            {}
+  # decision_tree:          {random_state: 42, class_weight: balanced}
+  # random_forest:          {n_estimators: 200, random_state: 42, n_jobs: -1, class_weight: balanced}
+  #                         (more trees never overfit, they only cost time -- fixed, not tuned)
   # oblique_random_forest:  {n_estimators: 200, n_components: 10, random_state: 42, n_jobs: -1}
   # adaboost:               {max_depth: 1, n_estimators: 200, learning_rate: 1.0, random_state: 42}
+  # hist_gradient_boosting: {random_state: 42, class_weight: balanced}
 
 tuning:
   # Week 5: hyperparameter tuning with Optuna (seeded TPE sampler), development set only. Every
@@ -119,6 +123,24 @@ tuning:
       model__estimator__max_depth: {type: int, low: 1, high: 8}
       model__n_estimators: {type: int, low: 25, high: 400, log: true}
       model__learning_rate: {type: float, low: 0.01, high: 1.0, log: true}
+    # Week 7: number of trees, learning rate and tree size trade off, so they are searched
+    # together (rounds and learning rate on a log scale)
+    gradient_boosting:
+      model__n_estimators: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_depth: {type: int, low: 1, high: 6}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__subsample: {type: float, low: 0.5, high: 1.0}
+    hist_gradient_boosting:
+      model__max_iter: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_leaf_nodes: {type: int, low: 2, high: 63, log: true}
+      model__min_samples_leaf: {type: int, low: 5, high: 200, log: true}
+      model__l2_regularization: {type: float, low: 0.000001, high: 10.0, log: true}
+    # the variance added to every feature's, for stability (log scale: it spans 11 orders)
+    naive_bayes:
+      model__var_smoothing: {type: float, low: 1.0e-12, high: 0.1, log: true}
 
 output:
   results_dir: "results"   # each run's full report is saved here as a timestamped .txt file
+  scoreboard: "results/runs.csv"   # one row per run; delete it when the data, cleaning or folds change

@@ -1,7 +1,11 @@
 """Model construction: the model alone (`build_model`) and preprocessing + model (`build_pipeline`)."""
 from sklearn.dummy import DummyClassifier
-from sklearn.ensemble import AdaBoostClassifier, BaggingClassifier, RandomForestClassifier
+from sklearn.ensemble import (
+    AdaBoostClassifier, BaggingClassifier, GradientBoostingClassifier, HistGradientBoostingClassifier,
+    RandomForestClassifier,
+)
 from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import GaussianNB
 from sklearn.pipeline import Pipeline
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.tree import DecisionTreeClassifier
@@ -45,6 +49,10 @@ _MODELS = {
     # week 6: functions, not classes -- build_model() calls them the same way
     "oblique_random_forest": oblique_random_forest,   # bagged trees on random linear combinations
     "adaboost": adaboost,                             # trees built in sequence on re-weighted rows
+    # week 7: scikit-learn's classes, no builder functions
+    "gradient_boosting": GradientBoostingClassifier,           # regression trees fit to the loss gradient
+    "hist_gradient_boosting": HistGradientBoostingClassifier,  # the same, on binned features (faster)
+    "naive_bayes": GaussianNB,                                 # fast probabilistic baseline
 }
 
 

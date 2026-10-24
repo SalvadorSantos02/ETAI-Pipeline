@@ -29,10 +29,10 @@ See `data/README.md` for the full problem description and data dictionary.
 ├── src/
 │   ├── data.py             # loading
 │   ├── preprocessing.py    # cleaning rules + leak-safe ColumnTransformer + the locked test split
-│   ├── model.py            # model registry (incl. oblique forest, AdaBoost) + build_pipeline() (preprocessing + model)
-│   ├── evaluate.py         # cross-validation, out-of-fold reports + fairness check
+│   ├── model.py            # model registry (incl. oblique forest, AdaBoost, the boosters, Naive Bayes) + build_pipeline() (preprocessing + model)
+│   ├── evaluate.py         # scorers, cross-validation on several metrics, out-of-fold reports, fairness check, paired test
 │   ├── tuning.py           # Optuna tuning, nested cross-validation, tuning report
-│   └── results.py          # saves each run's report to disk
+│   └── results.py          # the scoreboard (results/runs.csv) + each run's report on disk
 ├── results/                # created automatically -- one file per run (not tracked in git)
 └── data/
     ├── compas_two_year_recidivism.csv
@@ -50,6 +50,7 @@ This table is updated after each practical class, so you can always see what cha
 | 4 | Preprocessing review + cross-validation | A locked 20% test set (`split_dev_test()`, stratified, seed 42, never scored) and stratified 5-fold CV of the whole pipeline on the development set (`src/evaluate.py`): per-fold train/validation/gap, out-of-fold classification and fairness reports. `clean_dataset()` became row-preserving, de-duplication moved to a training-only `drop_duplicate_rows()`, and `src/data_diagnostics.py` was folded into preprocessing; random forest added as a model |
 | 5 | CV & hyperparameter tuning | `src/tuning.py` (new): `tune_pipeline()` runs a seeded Optuna TPE study where every trial cross-validates the whole pipeline on the same folds; `nested_cross_validate()` gives the honest estimate of "tune, then refit"; `tuning_report()` prints the top trials and the optimism check. `build_pipeline()` in `src/model.py` is now the one place the estimator is assembled. `config.yaml` gains a `tuning` section (on/off, trials, folds, seed, one search space per model) and the model is the decision tree again; `optuna` added to requirements |
 | 6 | Ensembles in depth -- random forest, oblique random forest, AdaBoost | `src/model.py` gains two model builders, registered in `_MODELS` next to the classes: `oblique_random_forest()` (a `BaggingClassifier` of `SparseRandomProjection` -> `DecisionTreeClassifier` pipelines, so every split is a random hyperplane, a new set of directions per tree) and `adaboost()` (`AdaBoostClassifier` over trees of a chosen depth). `config.yaml`: the random forest is the model `main.py` runs (200 trees, fixed), and `tuning.search_spaces` has one space per ensemble -- tree size and `max_features` for the forest (no longer `n_estimators`), the same tree size through `model__estimator__tree__...` plus `n_components` for the oblique forest, base-tree depth, rounds and learning rate for AdaBoost. No other file and no package changed |
+| 7 | Boosting & metric evaluation | `src/model.py`: `gradient_boosting`, `hist_gradient_boosting` and `naive_bayes` (`GaussianNB`, a fast probabilistic baseline) in `_MODELS`, scikit-learn's classes as they are. `src/evaluate.py`: `build_scorers()` (scikit-learn's names plus `fbeta_<beta>`); `cross_validate_pipeline()` scores every metric and returns out-of-fold **probabilities**; the classification report (now with a confusion matrix) and the fairness check take those probabilities and a threshold; `corrected_paired_test()` (Nadeau & Bengio). `src/tuning.py`: tuning maximises the selection metric's scorer, and nested CV scores every metric on each outer fold. `src/results.py`: `save_scores()` appends every run to the scoreboard. `main.py`: the scorers, the no-model floor on the same folds, the scoreboard row and board. `config.yaml`: `cv.metrics` (8) and `cv.selection_metric: roc_auc` replace `scoring`; gradient boosting is the model `main.py` runs; search spaces for the three new models; `class_weight: balanced` in the commented params that support it; `output.scoreboard`. No package changed |
 
 ## Preprocessing decisions
 
@@ -196,6 +197,48 @@ and least for AdaBoost with stumps, which was already well behaved. I would repo
 0.682 ± 0.017 from nested CV**, not the 0.684 of its best trial; that all five models end between
 0.672 and 0.682 says the ceiling is the information in these 10 features, not the model.
 
+### Scoreboard
+
+Week 7 changes how every model is judged: each fold is scored on eight metrics (`cv.metrics`)
+from out-of-fold probabilities, and one of them, the **selection metric**, is what tuning maximises
+and runs are ranked by. Every row below is one `python main.py` (one per model, appended to
+`results/runs.csv`), tuned where the model has a search space (30 Optuna trials x 5 inner folds,
+nested over the same 5 outer folds as every week since week 4). `Untuned` is the same model with
+its `config.yaml` params; the floor is the dummy on the same folds. The numbers are **ROC-AUC**, so
+they don't compare with the accuracy tables above.
+
+| Model | Untuned ROC-AUC (CV) | Tuned ROC-AUC (nested CV, mean ± std) | Floor | Chosen hyperparameters |
+|---|---|---|---|---|
+| Gradient boosting | 0.727 | **0.727 ± 0.014** | 0.500 | `n_estimators=426`, `learning_rate=0.012`, `max_depth=3`, `min_samples_leaf=2`, `subsample=0.77` |
+| HistGradientBoosting | 0.717 | 0.727 ± 0.016 | 0.500 | `max_iter=82`, `learning_rate=0.11`, `max_leaf_nodes=4`, `min_samples_leaf=130`, `l2_regularization=0.0007` |
+| AdaBoost | 0.723 | 0.727 ± 0.015 | 0.500 | base `max_depth=4`, `n_estimators=55`, `learning_rate=0.17` |
+| Oblique random forest | 0.685 | 0.727 ± 0.015 | 0.500 | `max_depth=12`, `min_samples_leaf=87`, `n_components=8` |
+| Random forest | 0.682 | 0.725 ± 0.014 | 0.500 | `max_depth=23`, `min_samples_leaf=23`, `max_features=sqrt` |
+| Logistic regression | 0.719 | 0.718 ± 0.014 | 0.500 | `C=0.0022` |
+| Decision tree | 0.605 | 0.717 ± 0.017 | 0.500 | `max_depth=16`, `min_samples_leaf=88`, `criterion=gini` |
+| Naive Bayes | 0.685 | 0.705 ± 0.012 | 0.500 | `var_smoothing=0.091` |
+| Dummy (no model) | 0.500 | — | 0.500 | — |
+
+Untuned params: `class_weight: balanced` for logistic regression, the tree, the random forest and
+HistGradientBoosting; otherwise as in week 6, and `random_state=42` only for gradient boosting.
+
+**Selection metric: ROC-AUC.** COMPAS is a risk score used to *rank* people, and ROC-AUC measures
+exactly that -- the probability that a random reoffender gets a higher score than a random
+non-reoffender -- without fixing a threshold, which is a separate decision (how many people to
+flag) that I don't want the model choice to prejudge. It is also the steadier metric to compare
+models on: it uses the whole ranking rather than which side of 0.5 each row falls on, so its
+fold-to-fold differences are less noisy than accuracy's.
+
+**What the board says.** With the corrected paired t-test on the same folds, the top four
+(gradient boosting, HistGradientBoosting, AdaBoost, oblique forest) cannot be separated: gradient
+boosting is ahead by 0.0004-0.001, winning 3 or 4 folds of 5, p > 0.7. The random forest is
+behind by 0.002 in all 5 folds (p = 0.09, not significant). Logistic regression (-0.009,
+p = 0.004), the decision tree (-0.011, p = 0.03) and Naive Bayes (-0.022, p = 0.004) are genuinely
+worse. Tuning mattered most where the defaults overfit (the tree +0.11, both forests +0.04) and
+almost not at all for gradient boosting, whose defaults are already shallow trees with a small
+learning rate. I would report **gradient boosting, 0.727 ± 0.014 from nested CV**, knowing the
+other three boosted/ensemble models are tied with it.
+
 ## Environment setup
 
 You only need to do this once per machine.
@@ -255,34 +298,41 @@ python main.py
 
 This loads `config.yaml`, cleans the data, sets the locked test set aside, cross-validates the
 pipeline on the development set, and prints:
-- the **per-fold table** -- train and validation score for each of the 5 folds, plus the gap
-  between them, and the mean +/- std of each column. A large, consistent gap is overfitting.
-- a **classification report on the out-of-fold predictions**, so every development row is scored
-  by a model that never trained on it
+- the **selection metric** (`cv.selection_metric`, ROC-AUC) of the default model -- mean ± std over
+  the 5 folds, the train-validation gap (a large, consistent gap is overfitting) and the
+  **no-model floor** (a dummy on the same folds)
+- **every metric** in `cv.metrics`, mean ± std
+- the **scoreboard**: every run so far on the same data and metric, best first
+- and saves to the results file the per-fold tables, a **confusion matrix and classification
+  report on the out-of-fold predictions** (threshold 0.5), so every development row is scored by a
+  model that never trained on it
 - a **false-positive-rate-by-race comparison** between our model and COMPAS's own score, on those
   same out-of-fold predictions
 
-With `tuning.enabled: true` (the default since week 5) it also prints, between the first CV
-table and the classification report, the **nested CV table** (one row per outer fold, with the
-hyperparameters chosen in it) and the **tuning report** (best hyperparameters, top 5 trials and the
-optimism check). The classification and fairness reports then use the nested out-of-fold
-predictions, and the final refit uses the tuned hyperparameters. With `enabled: false` the run is
-exactly week 4's. The decision tree takes under a minute; each ensemble 15-20 minutes (900 fits), so while
-testing set `tuning.n_trials: 5` or `tuning.enabled: false`.
+With `tuning.enabled: true` (the default since week 5) it also prints the nested CV score of the
+tuned model and the chosen hyperparameters; the results file gets the **nested CV table** (one row
+per outer fold, every metric, the hyperparameters chosen in it) and the **tuning report** (top 5
+trials and the optimism check). The metrics, classification and fairness reports then use the
+nested out-of-fold predictions, the scoreboard row the nested fold scores, and the final refit the
+tuned hyperparameters. With `enabled: false` there is no tuning. Logistic regression, Naive Bayes
+and the decision tree take a minute or two; the ensembles and boosters 10-20 minutes each (900
+fits), so while testing set `tuning.n_trials: 5` or `tuning.enabled: false`.
 
 It then refits the pipeline on the whole development set -- cross-validation estimates how good
 the *recipe* is and throws its five models away; this last fit is the model you would actually
 use. The locked test set is never scored.
 
 All of this is also saved to a timestamped file in `results/` (e.g. `results/run_20261003_191844.txt`),
-so it doesn't just scroll past in your terminal -- open it later, or change something in
-`config.yaml` (like the model type) and compare the new file to the last one. `results/` is
-created automatically the first time you run the pipeline, and isn't tracked in git (see
-`.gitignore`) since it's generated output, not source.
+so it doesn't just scroll past in your terminal, and every run adds one row to
+`results/runs.csv` (the scoreboard: model, params, tuned params, mean, std, untuned score, floor and
+the score on each fold). Only runs on the same data, cleaning and folds are comparable, so delete
+`results/runs.csv` when any of those change. `results/` is created automatically the first time you
+run the pipeline, and isn't tracked in git (see `.gitignore`) since it's generated output, not source.
 
-To reproduce the model comparison table above, switch `model.type` in `config.yaml` between
-`dummy`, `logistic_regression`, `decision_tree`, `random_forest`, `oblique_random_forest` and
-`adaboost` (the matching `params` are commented there) and run `python main.py` for each.
+To reproduce the scoreboard above, switch `model.type` in `config.yaml` between `dummy`,
+`logistic_regression`, `naive_bayes`, `decision_tree`, `random_forest`, `oblique_random_forest`,
+`adaboost`, `gradient_boosting` and `hist_gradient_boosting` (the matching `params` are commented
+there) and run `python main.py` for each (`tuning.enabled: false` for the dummy).
 
 ### A note on scikit-learn versions
 
