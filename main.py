@@ -4,19 +4,21 @@ Entry point for the predictive pipeline.
 Run with:
     python main.py
 
-What it does, week 7:
+What it does, week 8:
     load config -> load data -> clean (fit-free, row-preserving) -> drop duplicates (training
-    only) -> features/target -> lock the test set aside -> cross-validate [preprocessor + model]
-    as one Pipeline on the development set, on every metric in cv.metrics, plus the no-model
+    only) -> features/target -> lock the test set aside -> cross-validate [preprocessor +
+    feature selection (if enabled) + model] as one Pipeline on the development set, on every metric in cv.metrics, plus the no-model
     floor (a dummy) on the same folds -> [if tuning is enabled: nested CV of the tuning
     procedure, then tuning on all development rows, both on cv.selection_metric] -> out-of-fold
-    reports (from probabilities) -> refit on the whole development set -> one row on the
-    scoreboard (results/runs.csv) + the full report
+    reports (from probabilities) -> refit on the whole development set -> the features the
+    final model keeps -> one row on the scoreboard (results/runs.csv) + the full report
 
 The locked test set is set aside and never scored. Cross-validation fits and throws away one
 model per fold: it estimates how good the *recipe* is. The model you would actually deploy is
 the same pipeline refit on all development rows, which is what happens at the end.
 """
+import shutil
+import tempfile
 from datetime import datetime
 
 import optuna
@@ -87,9 +89,21 @@ def main():
           f"{cv_config['n_splits']}-fold CV")
     print(f"Data:  {len(X_dev)} development rows   |   {len(X_test)} test rows locked away (not used)")
 
-    # preprocessor + model as one object, so every fold re-learns its own medians,
-    # category statistics and scale from its training rows alone
-    pipeline = build_pipeline(config["preprocessing"], config["model"])
+    # week 8: feature selection is a learned step (it looks at the labels), so it lives inside
+    # the Pipeline and is re-fit on the training rows of every fold
+    selection_config = config.get("feature_selection") or {}
+    selection_enabled = selection_config.get("enabled", False)
+    selection_label = f"vote, min_votes={selection_config.get('min_votes', 2)}" if selection_enabled else "off"
+    print(f"Feature selection: {selection_label}")
+
+    # a new, empty cache folder for this run only: the fitted prep and select steps are stored
+    # there and reused when the same step is fit on the same rows again (a later tuning trial on
+    # the same fold), so tuning the model doesn't refit them every time. Deleted at the end.
+    cache_dir = tempfile.mkdtemp(prefix="pipeline_cache_")
+
+    # preprocessor + selection + model as one object, so every fold re-learns its own medians,
+    # category statistics, scale and kept features from its training rows alone
+    pipeline = build_pipeline(config["preprocessing"], config["model"], selection_config, memory=cache_dir)
     # the no-model floor, on the same folds: what every model must beat
     floor_pipeline = build_pipeline(config["preprocessing"], {"type": "dummy"})
     floor_scores, _ = cross_validate_pipeline(floor_pipeline, X_dev, y_dev, cv,
@@ -114,7 +128,11 @@ def main():
         if model_type not in search_spaces:
             raise ValueError(f"tuning is enabled but config.yaml has no tuning.search_spaces for "
                              f"'{model_type}'. Add one, or set tuning.enabled: false.")
-        search_space = search_spaces[model_type]
+        search_space = dict(search_spaces[model_type])
+        # week 8: how many votes a feature needs is a hyperparameter like any other, tuned
+        # together with the model (and so covered by the nested CV)
+        if selection_enabled:
+            search_space.update(selection_config.get("search_space") or {})
         n_trials = tuning_config["n_trials"]
         tuning_seed = tuning_config["random_state"]
         optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -153,18 +171,31 @@ def main():
              f"({len(X_test)} test rows still locked away, never scored).")
     report += "\n" + refit + "\n"
 
+    # week 8: what the final model actually sees (after preprocessing, and after selection if on)
+    kept = list(pipeline[:-1].get_feature_names_out())
+    if selection_enabled:
+        votes = dict(zip(pipeline.named_steps["prep"].get_feature_names_out(),
+                         pipeline.named_steps["select"].votes_))
+        kept_line = (f"Features kept ({len(kept)} of {len(votes)}): {', '.join(kept)}\n"
+                     f"Votes (of 3): {', '.join(f'{name} {int(v)}' for name, v in votes.items())}")
+    else:
+        kept_line = f"Features kept (no selection, all {len(kept)}): {', '.join(kept)}"
+    report += kept_line + "\n"
+
     # week 7: the scoreboard -- one row per run, with the floor and the untuned score on the
     # same folds, and the score on each fold (so two runs can be compared fold by fold)
     row = {"run": run, "data": config["data"]["path"], "model": model_type, "tuned": tuning_enabled,
+           "feature_selection": selection_label,
            "encoder": config["preprocessing"]["encoder"], "scaler": config["preprocessing"]["scaler"],
            "params": str(config["model"].get("params")), "tuned_params": str(study.best_params) if tuning_enabled else "",
            "metric": selection_metric, "mean": final_scores["validation"].mean(),
            "std": final_scores["validation"].std(ddof=1), "untuned": untuned, "floor": floor,
            **{f"fold_{i}": score for i, score in enumerate(final_scores["validation"], start=1)}}
     runs = save_scores(config.get("output", {}).get("scoreboard", "results/runs.csv"), row)
-    same = runs[(runs["data"] == row["data"]) & (runs["metric"] == selection_metric)]
+    same = runs[(runs["data"] == row["data"]) & (runs["metric"] == selection_metric)].copy()
+    same["feature_selection"] = same["feature_selection"].fillna("off")   # runs before week 8
     board = (same.sort_values("mean", ascending=False)
-             [["run", "model", "tuned", "encoder", "scaler", "mean", "std", "untuned", "floor"]]
+             [["run", "model", "tuned", "feature_selection", "encoder", "scaler", "mean", "std", "untuned", "floor"]]
              .rename(columns={"mean": selection_metric})
              .to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     print(f"\nScoreboard (runs on the same data and metric; best first)\n{board}")
@@ -172,6 +203,10 @@ def main():
 
     path = save_run(config.get("output", {}).get("results_dir", "results"), run, config, report)
     print(f"\n{refit}\nFull report (per-fold tables, tuning, confusion matrix, fairness): {path}")
+    print(kept_line)
+
+    # the cached prep/select fits are only valid for this run
+    shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

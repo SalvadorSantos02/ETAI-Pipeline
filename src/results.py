@@ -29,6 +29,11 @@ def save_run(results_dir: str, run: str, config: dict, report_text: str) -> str:
     tuning = config.get("tuning", {})
     tuning_line = (f"Optuna, {tuning['n_trials']} trials x {tuning['n_splits']} folds, nested CV  "
                    f"random_state={tuning['random_state']}" if tuning.get("enabled") else "off")
+    # week 8: which features the model may see is part of the run's setup
+    selection = config.get("feature_selection") or {}
+    selection_line = (f"vote, min_votes={selection.get('min_votes', 2)}  random_state={selection.get('random_state')}"
+                      + ("  (min_votes tuned with the model)" if tuning.get("enabled") and selection.get("search_space") else "")
+                      if selection.get("enabled") else "off")
     header = (
         f"Run: {run}\n"
         f"Model: {config['model']['type']}  params={config['model'].get('params')}\n"
@@ -38,6 +43,7 @@ def save_run(results_dir: str, run: str, config: dict, report_text: str) -> str:
         f"random_state={cv.get('random_state')}\n"
         f"Metrics: {cv['metrics']}  selection metric: {cv['selection_metric']}\n"
         f"Tuning: {tuning_line}\n"
+        f"Feature selection: {selection_line}\n"
         f"Locked test set: size={config['test_set']['size']}  "
         f"random_state={config['test_set']['random_state']}  (set aside, never scored)\n"
         + "=" * 60 + "\n\n"

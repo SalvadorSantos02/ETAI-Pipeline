@@ -29,7 +29,7 @@ See `data/README.md` for the full problem description and data dictionary.
 ├── src/
 │   ├── data.py             # loading
 │   ├── preprocessing.py    # cleaning rules + leak-safe ColumnTransformer + the locked test split
-│   ├── model.py            # model registry (incl. oblique forest, AdaBoost, the boosters, Naive Bayes) + build_pipeline() (preprocessing + model)
+│   ├── model.py            # model registry (incl. oblique forest, AdaBoost, the boosters, XGBoost, Naive Bayes) + VoteSelector + build_pipeline() (preprocessing + selection + model)
 │   ├── evaluate.py         # scorers, cross-validation on several metrics, out-of-fold reports, fairness check, paired test
 │   ├── tuning.py           # Optuna tuning, nested cross-validation, tuning report
 │   └── results.py          # the scoreboard (results/runs.csv) + each run's report on disk
@@ -51,6 +51,7 @@ This table is updated after each practical class, so you can always see what cha
 | 5 | CV & hyperparameter tuning | `src/tuning.py` (new): `tune_pipeline()` runs a seeded Optuna TPE study where every trial cross-validates the whole pipeline on the same folds; `nested_cross_validate()` gives the honest estimate of "tune, then refit"; `tuning_report()` prints the top trials and the optimism check. `build_pipeline()` in `src/model.py` is now the one place the estimator is assembled. `config.yaml` gains a `tuning` section (on/off, trials, folds, seed, one search space per model) and the model is the decision tree again; `optuna` added to requirements |
 | 6 | Ensembles in depth -- random forest, oblique random forest, AdaBoost | `src/model.py` gains two model builders, registered in `_MODELS` next to the classes: `oblique_random_forest()` (a `BaggingClassifier` of `SparseRandomProjection` -> `DecisionTreeClassifier` pipelines, so every split is a random hyperplane, a new set of directions per tree) and `adaboost()` (`AdaBoostClassifier` over trees of a chosen depth). `config.yaml`: the random forest is the model `main.py` runs (200 trees, fixed), and `tuning.search_spaces` has one space per ensemble -- tree size and `max_features` for the forest (no longer `n_estimators`), the same tree size through `model__estimator__tree__...` plus `n_components` for the oblique forest, base-tree depth, rounds and learning rate for AdaBoost. No other file and no package changed |
 | 7 | Boosting & metric evaluation | `src/model.py`: `gradient_boosting`, `hist_gradient_boosting` and `naive_bayes` (`GaussianNB`, a fast probabilistic baseline) in `_MODELS`, scikit-learn's classes as they are. `src/evaluate.py`: `build_scorers()` (scikit-learn's names plus `fbeta_<beta>`); `cross_validate_pipeline()` scores every metric and returns out-of-fold **probabilities**; the classification report (now with a confusion matrix) and the fairness check take those probabilities and a threshold; `corrected_paired_test()` (Nadeau & Bengio). `src/tuning.py`: tuning maximises the selection metric's scorer, and nested CV scores every metric on each outer fold. `src/results.py`: `save_scores()` appends every run to the scoreboard. `main.py`: the scorers, the no-model floor on the same folds, the scoreboard row and board. `config.yaml`: `cv.metrics` (8) and `cv.selection_metric: roc_auc` replace `scoring`; gradient boosting is the model `main.py` runs; search spaces for the three new models; `class_weight: balanced` in the commented params that support it; `output.scoreboard`. No package changed |
+| 8 | XGBoost & feature selection | `src/model.py`: `"xgboost": XGBClassifier` in `_MODELS`; a new `VoteSelector` (a random forest and gradient boosting vote for the features with above-average importance, an L1 logistic regression for those it doesn't shrink to zero; a feature is kept with at least `min_votes` of the 3 votes); `build_pipeline()` takes the `feature_selection` section and a cache folder (`memory`) and puts the selector between `prep` and `model`, so it is re-fit on the training rows of every fold. `main.py`: a fresh cache folder per run (`tempfile.mkdtemp`, removed with `shutil.rmtree` at the end) so tuning doesn't refit prep and selection in every trial; with tuning on, `select__min_votes` joins the model's search space (and so the nested CV); prints the features the final model keeps, with each one's votes; scoreboard column `feature_selection`. `src/results.py`: the report header records the selection setting. `config.yaml`: `model.type: xgboost` (300 trees, learning rate 0.05, depth 4), the `xgboost` search space with its in-split brakes (`min_child_weight`, `reg_lambda`, `reg_alpha`, `gamma`), and the `feature_selection` section (on, `min_votes: 2`, tuned 1-3). `requirements.txt`: `xgboost>=2.0` |
 
 ## Preprocessing decisions
 
@@ -239,6 +240,47 @@ almost not at all for gradient boosting, whose defaults are already shallow tree
 learning rate. I would report **gradient boosting, 0.727 ± 0.014 from nested CV**, knowing the
 other three boosted/ensemble models are tied with it.
 
+### Feature selection
+
+Week 8 adds XGBoost and a feature-selection step. Both runs below are `python main.py` with
+`model.type: xgboost`, tuning on (30 Optuna trials x 5 inner folds, nested over the same 5 outer
+folds as every run on the scoreboard); the only difference is `feature_selection.enabled`. With
+selection on, `select__min_votes` (1-3) is tuned together with XGBoost's nine hyperparameters, so
+the nested score covers the choice of how much to select too.
+
+| XGBoost, tuned | Untuned ROC-AUC (CV) | Tuned ROC-AUC (nested CV, mean ± std) | Fold scores | Features the final model uses |
+|---|---|---|---|---|
+| Without selection | 0.724 | **0.728 ± 0.015** | 0.733, 0.701, 0.733, 0.738, 0.734 | all 10 |
+| With selection (`VoteSelector`) | 0.721 | 0.725 ± 0.013 | 0.724, 0.703, 0.732, 0.732, 0.734 | 2: `age`, `priors_count` |
+
+Untuned = the `config.yaml` params (300 trees, learning rate 0.05, depth 4). **Corrected paired
+t-test** (Nadeau & Bengio, same folds, `test_train_ratio = 1/4`): with minus without selection =
+**-0.0024**, selection ahead in 2 of 5 folds, t = -0.82, **p = 0.46**. Not a significant
+difference. Without selection, XGBoost ties last week's best, gradient boosting (+0.0002,
+p = 0.93).
+
+**The features kept.** The vote is unanimous in both directions: `age` and `priors_count` get all
+three votes, and every other feature gets none -- the random forest and gradient boosting both
+put their above-average importance on those two, and the L1 logistic regression (C = 0.01, a
+strong penalty) shrinks everything else to zero. So on the full development set `min_votes` 1, 2
+and 3 all keep the same two features, which is why tuning settles on 2 without it mattering. Inside
+the outer folds it chose 2, 1, 2, 1 and 3: the choice moves around because the candidates are
+nearly indistinguishable there too, not because one setting is better.
+
+**Is the smaller model as good?** Yes, within the noise: two features out of ten keep the ROC-AUC
+at 0.725 against 0.728, a gap of 0.002 that is a fifth of the fold-to-fold std and far from
+significant (p = 0.46). Most of what these ten columns say about reoffending is in a person's age
+and number of prior offences; the juvenile counts, sex, charge degree and the missingness flags add
+at most a few thousandths. **Would I keep selection on?** Yes, and `config.yaml` leaves it on,
+but for explainability rather than accuracy. It buys no score here -- there are no noise columns
+for it to remove, unlike the notebook's case with 20 added random columns -- and it makes each run
+slower, because the selector fits three models per fold. What it buys is a model that rests on two
+inputs anyone can check, which on a dataset used to inform bail decisions is not a minor point,
+with the same fairness picture (false-positive rate 0.30 for African-American and 0.16 for
+Caucasian defendants, against 0.30 / 0.17 with all ten). If the goal were the last thousandth of
+ROC-AUC, the honest answer is that the two runs are tied and either is defensible. I will re-check
+it when engineered features (week 6 challenge 1) add columns that could be noise.
+
 ## Environment setup
 
 You only need to do this once per machine.
@@ -331,8 +373,11 @@ run the pipeline, and isn't tracked in git (see `.gitignore`) since it's generat
 
 To reproduce the scoreboard above, switch `model.type` in `config.yaml` between `dummy`,
 `logistic_regression`, `naive_bayes`, `decision_tree`, `random_forest`, `oblique_random_forest`,
-`adaboost`, `gradient_boosting` and `hist_gradient_boosting` (the matching `params` are commented
-there) and run `python main.py` for each (`tuning.enabled: false` for the dummy).
+`adaboost`, `gradient_boosting`, `hist_gradient_boosting` and `xgboost` (the matching `params` are
+commented there) and run `python main.py` for each (`tuning.enabled: false` for the dummy). The
+week 7 rows were run before feature selection existed: set `feature_selection.enabled: false` to
+reproduce them. With it on, the output also ends with **Features kept**: the features the final
+model uses and each one's votes.
 
 ### A note on scikit-learn versions
 
