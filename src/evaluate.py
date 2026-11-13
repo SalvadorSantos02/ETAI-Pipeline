@@ -103,26 +103,32 @@ def oof_classification_report(y_true, oof_proba, threshold: float = 0.5) -> str:
 
 
 def fairness_report(y_true, oof_proba, extras: pd.DataFrame, sensitive_attr: str = "race",
-                    threshold: float = 0.5) -> str:
+                    threshold: float = 0.5, reference_score: dict = None) -> str:
     """
-    False positive rate (share of people who did not reoffend but were predicted to) per
-    group of `sensitive_attr`, for the model's out-of-fold predictions and for COMPAS's own
-    score (`score_text` other than "Low" counts as predicted to reoffend), on the same rows.
-    Rows with an unknown group are reported as "unknown". A simple check, not a full audit --
-    just enough to show that "accurate" and "fair" are not the same thing.
+    False positive rate (share of the true negatives -- class 0 -- that the model predicted as
+    class 1) per group of `sensitive_attr`, for the model's out-of-fold predictions and, when
+    `reference_score` is given, for an existing score on the same rows: {"column": ...,
+    "label": ..., "negative_value": ...}, every value other than `negative_value` counting as
+    predicted 1 (COMPAS: `score_text` other than "Low"). Rows with an unknown group are
+    reported as "unknown". A simple check, not a full audit -- just enough to show that
+    "accurate" and "fair" are not the same thing.
     """
     df = extras.copy()
     df[sensitive_attr] = df[sensitive_attr].astype(object).fillna("unknown")
     df["y_true"] = pd.Series(y_true).values
     df["y_pred_model"] = (oof_proba >= threshold).astype(int)
-    df["y_pred_compas"] = (df["score_text"] != "Low").astype(int)
+    predictions = [("Our model", "y_pred_model")]
+    # week 9: COMPAS's own score is one dataset's reference, set in the config, not assumed
+    if reference_score and reference_score.get("column") in df.columns:
+        df["y_pred_reference"] = (df[reference_score["column"]] != reference_score["negative_value"]).astype(int)
+        predictions.append((reference_score.get("label", reference_score["column"]), "y_pred_reference"))
 
     lines = [
         f"False positive rate by {sensitive_attr} (development set, out-of-fold)",
-        "(share of people who did NOT reoffend, but were predicted to)",
+        "(share of the true class 0 that was predicted as class 1)",
         "",
     ]
-    for label, col in [("Our model", "y_pred_model"), ("COMPAS's own score", "y_pred_compas")]:
+    for label, col in predictions:
         lines.append(f"  {label}:")
         for group, g in df.groupby(sensitive_attr):
             negatives = g[g["y_true"] == 0]

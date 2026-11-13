@@ -2,9 +2,10 @@
 Entry point for the predictive pipeline.
 
 Run with:
-    python main.py
+    python main.py                      # COMPAS (config.yaml)
+    python main.py config_adult.yaml    # week 9: any other problem, through its own config
 
-What it does, week 8:
+What it does, week 8 (week 9: plus predictions for a new, unlabelled file, when the config names one):
     load config -> load data -> clean (fit-free, row-preserving) -> drop duplicates (training
     only) -> features/target -> lock the test set aside -> cross-validate [preprocessor +
     feature selection (if enabled) + model] as one Pipeline on the development set, on every metric in cv.metrics, plus the no-model
@@ -17,11 +18,14 @@ The locked test set is set aside and never scored. Cross-validation fits and thr
 model per fold: it estimates how good the *recipe* is. The model you would actually deploy is
 the same pipeline refit on all development rows, which is what happens at the end.
 """
+import os
 import shutil
+import sys
 import tempfile
 from datetime import datetime
 
 import optuna
+import pandas as pd
 import yaml
 from sklearn.model_selection import StratifiedKFold
 
@@ -49,8 +53,9 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def main():
-    config = load_config()
+def main(config_path: str = "config.yaml"):
+    config = load_config(config_path)
+    print(f"Config: {config_path}")
     run = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_type = config["model"]["type"]
 
@@ -111,10 +116,10 @@ def main():
     fold_scores, oof_proba = cross_validate_pipeline(pipeline, X_dev, y_dev, cv, scorers, selection_metric, n_jobs)
     floor, untuned = floor_scores["validation"].mean(), fold_scores["validation"].mean()
 
-    print("\nDefault hyperparameters (config.yaml)")
+    print(f"\nDefault hyperparameters ({config_path})")
     print(f"  {selection_metric}: {untuned:.3f} ± {fold_scores['validation'].std(ddof=1):.3f}   "
           f"train-validation gap: {fold_scores['gap'].mean():+.3f}   no-model floor: {floor:.3f}")
-    report = (f"Hyperparameters from config.yaml: {config['model'].get('params')}\n\n"
+    report = (f"Hyperparameters from {config_path}: {config['model'].get('params')}\n\n"
               + cv_report(fold_scores, metrics, selection_metric, "Cross-validation")
               + f"\n\nNo-model floor (dummy, same folds): {selection_metric} = {floor:.3f}")
     final_scores = fold_scores
@@ -126,7 +131,7 @@ def main():
     if tuning_enabled:
         search_spaces = tuning_config.get("search_spaces") or {}
         if model_type not in search_spaces:
-            raise ValueError(f"tuning is enabled but config.yaml has no tuning.search_spaces for "
+            raise ValueError(f"tuning is enabled but {config_path} has no tuning.search_spaces for "
                              f"'{model_type}'. Add one, or set tuning.enabled: false.")
         search_space = dict(search_spaces[model_type])
         # week 8: how many votes a feature needs is a hyperparameter like any other, tuned
@@ -163,7 +168,8 @@ def main():
     for name in metrics:
         print(f"  {name:<18s} {final_scores[name].mean():.3f} ± {final_scores[name].std(ddof=1):.3f}")
     report += "\n\n" + oof_classification_report(y_dev, oof_proba)
-    report += "\n" + fairness_report(y_dev, oof_proba, extras_dev, sensitive_attr=config["data"]["sensitive_attr"])
+    report += "\n" + fairness_report(y_dev, oof_proba, extras_dev, sensitive_attr=config["data"]["sensitive_attr"],
+                                     reference_score=config["data"].get("reference_score"))
 
     # CV estimates the recipe; the model you would deploy is this one (tuned, if tuning is on)
     pipeline.fit(X_dev, y_dev)
@@ -181,6 +187,33 @@ def main():
     else:
         kept_line = f"Features kept (no selection, all {len(kept)}): {', '.join(kept)}"
     report += kept_line + "\n"
+
+    # week 9: predictions for new, unlabelled rows (e.g. adult_new.csv), from the refit pipeline.
+    # Same cleaning as the training file, but no drop_duplicate_rows(): every row needs a prediction.
+    predict_config = config.get("predict") or {}
+    predictions_line = ""
+    if predict_config.get("path"):
+        new_rows = load_data(predict_config["path"])
+        new_clean = clean_dataset(new_rows, config["diagnostics"])
+        X_new, _, _ = split_features_target(new_clean, config["data"],
+                                            config["preprocessing"]["mnar_indicator_sources"])
+        X_new = X_new[X_dev.columns]                     # the training columns, in the same order
+        new_proba = pipeline.predict_proba(X_new)[:, 1]
+        threshold = predict_config.get("threshold", 0.5)
+        id_column = config["diagnostics"].get("id_column")
+        predictions = pd.DataFrame({
+            id_column: new_clean[id_column].values,
+            "probability": new_proba,
+            "prediction": (new_proba >= threshold).astype(int),
+        })
+        if len(predictions) != len(new_rows):
+            raise RuntimeError(f"{len(new_rows)} rows in, {len(predictions)} predictions out")
+        predictions_path = predict_config["output"]
+        os.makedirs(os.path.dirname(predictions_path) or ".", exist_ok=True)
+        predictions.to_csv(predictions_path, index=False)
+        predictions_line = (f"Predictions: {len(predictions)} rows of {predict_config['path']} -> {predictions_path} "
+                            f"(threshold {threshold}; {predictions['prediction'].mean():.1%} predicted 1)")
+        report += predictions_line + "\n"
 
     # week 7: the scoreboard -- one row per run, with the floor and the untuned score on the
     # same folds, and the score on each fold (so two runs can be compared fold by fold)
@@ -204,10 +237,13 @@ def main():
     path = save_run(config.get("output", {}).get("results_dir", "results"), run, config, report)
     print(f"\n{refit}\nFull report (per-fold tables, tuning, confusion matrix, fairness): {path}")
     print(kept_line)
+    if predictions_line:
+        print(predictions_line)
 
     # the cached prep/select fits are only valid for this run
     shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    main()
+    # week 9: the config is the problem; config.yaml (COMPAS) when none is given
+    main(sys.argv[1] if len(sys.argv) > 1 else "config.yaml")

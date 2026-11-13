@@ -6,6 +6,9 @@ data:
   target: "two_year_recid"
   sensitive_attr: "race"          # excluded from model features, used only to audit fairness
   drop_columns: ["id", "decile_score", "score_text"]  # identifiers / COMPAS's own score, not our model's inputs
+  # week 9: an existing score to audit next to ours in the fairness report (optional; Adult has none).
+  # Every value other than negative_value counts as predicted 1.
+  reference_score: {column: "score_text", label: "COMPAS's own score", negative_value: "Low"}
 
 diagnostics:
   # Week 3's diagnosis, written down as cleaning rules. clean_dataset() reads this section;

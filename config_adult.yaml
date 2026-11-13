@@ -1,0 +1,182 @@
+# Pipeline configuration -- week 9, option A: the Adult income data (1994 US Census, UCI Adult,
+# subsampled and extended for the course). Same pipeline as config.yaml; only what is specific to
+# the data changes (data, diagnostics, preprocessing, output, predict). Run:
+#     python main.py config_adult.yaml
+
+data:
+  path: "data/adult_train.csv"
+  target: "income_over_50k"       # 1 = earns more than 50K a year (about 24%)
+  sensitive_attr: "sex"           # excluded from model features, used only to audit fairness
+  # race is the other sensitive attribute: kept out of the features too, so the model never uses
+  # either protected characteristic directly. fnlwgt is a census sampling weight (how many people
+  # the row stands for), not a characteristic of the person. education is in redundant_columns.
+  drop_columns: ["id", "fnlwgt", "race"]
+  # no reference_score: Adult has no existing score to audit next to ours
+
+diagnostics:
+  # The notebook's diagnosis of Adult, written down as cleaning rules (no code names its columns)
+  placeholder_tokens: ["", "-", "?", "N/A", "NA", "n/a", "na", "nan"]   # "?" = unknown, in workclass / occupation / native_country
+  numeric_text_columns: []        # every numeric column loads as a number
+  validity_rules:
+    # Adult's own rules: COMPAS's age min 18 would erase the 74 valid 17-year-olds. No violations
+    # in these files; the rules protect future data. capital_gain 99999 is the census top code
+    # ("99999 or more"), a real value, so there is no max.
+    age: {min: 17, max: 90}
+    hours_per_week: {min: 1, max: 99}
+    capital_gain: {min: 0}
+    capital_loss: {min: 0}
+  canonical_categories: {}        # no spelling variants in Adult's categories
+  redundant_columns: ["education"]  # one to one with education_num ("Bachelors" is always 13); education_num keeps the order
+  id_column: "id"
+
+preprocessing:
+  # Target encoding again: native_country has 41 values, most with fewer than 5 people, so
+  # one-hot would add about 40 sparse columns
+  encoder: "target"
+  scaler: "robust"
+  random_state: 42
+  numeric_features: ["age", "education_num", "capital_gain", "capital_loss", "hours_per_week",
+                     "v01", "v02", "v03", "v04", "v05", "v06", "v07", "v08", "v09", "v10",
+                     "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18"]
+  categorical_features: ["workclass", "marital_status", "occupation", "relationship", "native_country",
+                         "v19", "v20", "v21", "v22", "v23", "v24", "v25"]
+  # workclass and occupation are missing for the same people, who earn > 50K about half as often
+  # (12% vs 25%): missingness carries information, so fill AND flag. occupation covers both (its
+  # 381 = workclass's 379 + 2 people who never worked). native_country and v01-v06 are missing
+  # with no pattern: impute only.
+  mnar_indicator_sources: ["occupation"]
+  imputation:
+    numeric_strategy: "median"
+    categorical_strategy: "most_frequent"
+
+test_set:
+  # Week 4: the FINAL TEST SET. Carved out once, stratified, and locked: never used to fit,
+  # tune, compare or choose anything. Used only for the final assessment.
+  # Do not change these two values after week 4 -- a new seed would silently give you a
+  # different (already partly "seen") test set.
+  size: 0.2
+  random_state: 42
+
+cv:
+  # Week 4: how models are evaluated -- stratified k-fold cross-validation on the
+  # development set (everything except the locked test set). Same random_state = same folds on
+  # every run, for every model, so comparisons are like-for-like.
+  n_splits: 5
+  shuffle: true
+  random_state: 42
+  # Week 7: reported for every run. fbeta_<beta> weights recall beta times as much as precision.
+  metrics: ["accuracy", "balanced_accuracy", "precision", "recall", "f1", "fbeta_2", "roc_auc", "average_precision"]
+  selection_metric: "roc_auc"   # one of metrics: what tuning maximises and runs are ranked by
+  n_jobs: 1             # folds fitted in parallel; -1 = all cores (only pays off for slow models, e.g. random forest)
+
+model:
+  # Week 8: XGBoost is the model main.py runs; every other model is one swap away.
+  type: "xgboost"   # dummy | logistic_regression | naive_bayes | decision_tree | random_forest | oblique_random_forest | adaboost | gradient_boosting | hist_gradient_boosting | xgboost
+  params:
+    # params are passed straight to the model builder, so they must match the chosen type.
+    # XGBoost's own defaults are aggressive (max_depth 6, learning_rate 0.3); these are the
+    # notebook's tamer starting point, and tuning replaces all but random_state / n_jobs.
+    n_estimators: 300
+    learning_rate: 0.05
+    max_depth: 4
+    random_state: 42
+    n_jobs: -1
+  # Other models' params, to swap in. class_weight "balanced" weights each class by 1 / its frequency
+  # (GradientBoostingClassifier and GaussianNB have no class_weight).
+  # dummy:                  {} (predicts the majority class; the floor every model must beat)
+  # logistic_regression:    {max_iter: 2000, class_weight: balanced}
+  # naive_bayes:            {}
+  # decision_tree:          {random_state: 42, class_weight: balanced}
+  # random_forest:          {n_estimators: 200, random_state: 42, n_jobs: -1, class_weight: balanced}
+  #                         (more trees never overfit, they only cost time -- fixed, not tuned)
+  # oblique_random_forest:  {n_estimators: 200, n_components: 10, random_state: 42, n_jobs: -1}
+  # adaboost:               {max_depth: 1, n_estimators: 200, learning_rate: 1.0, random_state: 42}
+  # hist_gradient_boosting: {random_state: 42, class_weight: balanced}
+  # gradient_boosting:      {random_state: 42}
+
+tuning:
+  # Week 5: hyperparameter tuning with Optuna (seeded TPE sampler), development set only. Every
+  # candidate is the whole pipeline, scored by CV on the same folds; nested CV gives the honest
+  # number. enabled: false = exactly the week 4 pipeline.
+  enabled: true
+  n_trials: 30
+  n_splits: 5                                       # folds that score each candidate
+  random_state: 42                                  # seeds the sampler and those folds
+  # Keys are Pipeline parameter names. Types: int / float (low, high, log) or categorical (choices).
+  # Only the space matching model.type is used. Ensembles take minutes per run (900 fits):
+  # use a small n_trials, or enabled: false, while testing.
+  search_spaces:
+    decision_tree:
+      model__max_depth: {type: int, low: 1, high: 20}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__criterion: {type: categorical, choices: ["gini", "entropy"]}
+    # Challenge 1: C is the inverse regularisation strength (smaller = stronger), so a log scale
+    logistic_regression:
+      model__C: {type: float, low: 0.0001, high: 100, log: true}
+    # Week 6: tree size and decorrelation (max_features 1.0 = plain bagging); n_estimators is
+    # fixed in model.params -- more trees never overfit
+    random_forest:
+      model__max_depth: {type: int, low: 2, high: 30}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__max_features: {type: categorical, choices: ["sqrt", 0.5, 1.0]}
+    # the same tree size, one level deeper (BaggingClassifier -> Pipeline -> tree), and how many
+    # random directions each tree may split on (at most the 10 features)
+    oblique_random_forest:
+      model__estimator__tree__max_depth: {type: int, low: 2, high: 30}
+      model__estimator__tree__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__estimator__project__n_components: {type: int, low: 3, high: 10}
+    # how weak the base trees are, and rounds x learning rate (they trade off, so tuned together)
+    adaboost:
+      model__estimator__max_depth: {type: int, low: 1, high: 8}
+      model__n_estimators: {type: int, low: 25, high: 400, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 1.0, log: true}
+    # Week 7: number of trees, learning rate and tree size trade off, so they are searched
+    # together (rounds and learning rate on a log scale)
+    gradient_boosting:
+      model__n_estimators: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_depth: {type: int, low: 1, high: 6}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__subsample: {type: float, low: 0.5, high: 1.0}
+    hist_gradient_boosting:
+      model__max_iter: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_leaf_nodes: {type: int, low: 2, high: 63, log: true}
+      model__min_samples_leaf: {type: int, low: 5, high: 200, log: true}
+      model__l2_regularization: {type: float, low: 0.000001, high: 10.0, log: true}
+    # the variance added to every feature's, for stability (log scale: it spans 11 orders)
+    naive_bayes:
+      model__var_smoothing: {type: float, low: 1.0e-12, high: 0.1, log: true}
+    # Week 8: the boosting knobs plus XGBoost's brakes inside every split -- min_child_weight,
+    # reg_lambda (L2), reg_alpha (L1) and gamma (minimum gain to split)
+    xgboost:
+      model__n_estimators: {type: int, low: 50, high: 600, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.3, log: true}
+      model__max_depth: {type: int, low: 1, high: 8}
+      model__min_child_weight: {type: float, low: 1.0, high: 50.0, log: true}
+      model__subsample: {type: float, low: 0.5, high: 1.0}
+      model__colsample_bytree: {type: float, low: 0.5, high: 1.0}
+      model__reg_lambda: {type: float, low: 0.01, high: 10.0, log: true}
+      model__reg_alpha: {type: float, low: 0.001, high: 10.0, log: true}
+      model__gamma: {type: float, low: 0.0, high: 5.0}
+
+# Week 8: learned step between preprocessing and the model: keeps the features that at least
+# min_votes of three models (random forest, gradient boosting, L1 logistic regression) choose.
+# Fitted on the training rows of every fold, like every other learned step.
+feature_selection:
+  enabled: true
+  min_votes: 2                                      # 1 (keep almost all) .. 3 (keep only unanimous)
+  random_state: 42
+  search_space:                                     # tuned together with the model when tuning is on
+    select__min_votes: {type: int, low: 1, high: 3}
+
+output:
+  results_dir: "results/adult"            # its own folder, so the scoreboard never mixes problems
+  scoreboard: "results/adult/runs.csv"
+
+# week 9: the final model's predictions for the 2,000 new people (no target). Same cleaning, no
+# duplicate dropping: rows out = rows in.
+predict:
+  path: "data/adult_new.csv"
+  output: "predictions/adult_new_predictions.csv"
+  threshold: 0.5

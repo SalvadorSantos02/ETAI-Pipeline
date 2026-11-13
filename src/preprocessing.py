@@ -95,6 +95,15 @@ def clean_dataset(df: pd.DataFrame, diagnostics_config: dict) -> pd.DataFrame:
 
     out = _canonicalize_categories(out, diagnostics_config.get("canonical_categories", {}), placeholder_tokens)
 
+    # week 9: placeholders in *every* text column, not only those with a canonical map. Up to
+    # week 8 a "?" was only caught in the mapped columns, which happened to be all of COMPAS's
+    # text columns; on Adult, "?" in workclass / occupation / native_country survived as a
+    # category of its own. Values are only replaced, never stripped or recased, so a column
+    # without placeholders comes out exactly as it went in.
+    for col in out.select_dtypes(include=["object", "string"]).columns:
+        is_placeholder = out[col].notna() & out[col].astype(str).str.strip().isin(placeholder_tokens)
+        out.loc[is_placeholder, col] = np.nan
+
     columns_to_drop = [c for c in diagnostics_config.get("redundant_columns", []) if c in out.columns]
     out = out.drop(columns=columns_to_drop)
 
@@ -140,7 +149,10 @@ def split_features_target(df: pd.DataFrame, data_config: dict, mnar_indicator_so
     df = add_missingness_indicators(df, mnar_indicator_sources)
     y = df[target] if target in df.columns else None
 
-    extras_cols = [c for c in [sensitive_attr, "score_text"] if c in df.columns]
+    # week 9: the reference score (COMPAS's own `score_text`) is a config setting, not a column
+    # name in the code; a dataset without one (Adult) simply doesn't set it
+    reference_column = (data_config.get("reference_score") or {}).get("column")
+    extras_cols = [c for c in [sensitive_attr, reference_column] if c and c in df.columns]
     extras = df[extras_cols].copy() if extras_cols else None
 
     always_drop = set(drop_columns) | {target, sensitive_attr}
