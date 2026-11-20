@@ -44,12 +44,17 @@ preprocessing:
   # The alternatives (onehot/ordinal/count, none/standard/minmax) are one config change away.
   encoder: "target"
   scaler: "robust"
-  random_state: 42        # the target encoder's internal cross-fitting folds
+  random_state: 42        # the target encoder's internal cross-fitting folds and the model-based imputers (week 10)
   numeric_features: ["age", "juv_fel_count", "juv_misd_count", "juv_other_count", "priors_count"]
   categorical_features: ["sex", "age_cat", "c_charge_degree"]
   mnar_indicator_sources: ["priors_count", "c_charge_degree"]   # MNAR -> fill AND flag
   imputation:
+    # Week 10: the numeric imputer, applied after scaling. median | mean | knn | iterative (MICE,
+    # one completed dataset) | random_forest (missForest). None of them sees the target.
     numeric_strategy: "median"
+    n_neighbors: 5            # knn
+    max_iter: 10              # iterative, random_forest
+    n_estimators: 50          # random_forest: trees per column model
     categorical_strategy: "most_frequent"
 
 test_set:
@@ -176,3 +181,4 @@ feature_selection:
 output:
   results_dir: "results"   # each run's full report is saved here as a timestamped .txt file
   scoreboard: "results/runs.csv"   # one row per run; delete it when the data, cleaning or folds change
+  model_path: "models/model.joblib"   # week 10: the final fitted pipeline, used by predict.py (overwritten each run)

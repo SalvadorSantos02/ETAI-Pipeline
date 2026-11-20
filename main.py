@@ -12,7 +12,8 @@ What it does, week 8 (week 9: plus predictions for a new, unlabelled file, when 
     floor (a dummy) on the same folds -> [if tuning is enabled: nested CV of the tuning
     procedure, then tuning on all development rows, both on cv.selection_metric] -> out-of-fold
     reports (from probabilities) -> refit on the whole development set -> the features the
-    final model keeps -> one row on the scoreboard (results/runs.csv) + the full report
+    final model keeps -> [week 10] the fitted pipeline saved to models/model.joblib, for predict.py
+-> one row on the scoreboard (results/runs.csv) + the full report
 
 The locked test set is set aside and never scored. Cross-validation fits and throws away one
 model per fold: it estimates how good the *recipe* is. The model you would actually deploy is
@@ -24,6 +25,7 @@ import sys
 import tempfile
 from datetime import datetime
 
+import joblib
 import optuna
 import pandas as pd
 import yaml
@@ -100,6 +102,10 @@ def main(config_path: str = "config.yaml"):
     selection_enabled = selection_config.get("enabled", False)
     selection_label = f"vote, min_votes={selection_config.get('min_votes', 2)}" if selection_enabled else "off"
     print(f"Feature selection: {selection_label}")
+    # week 10: which imputer fills the numeric gaps is part of the recipe, so it is printed and
+    # recorded on the scoreboard like the encoder and scaler
+    imputer = config["preprocessing"].get("imputation", {}).get("numeric_strategy", "median")
+    print(f"Numeric imputer: {imputer}")
 
     # a new, empty cache folder for this run only: the fitted prep and select steps are stored
     # there and reused when the same step is fit on the same rows again (a later tuning trial on
@@ -188,6 +194,13 @@ def main(config_path: str = "config.yaml"):
         kept_line = f"Features kept (no selection, all {len(kept)}): {', '.join(kept)}"
     report += kept_line + "\n"
 
+    # week 10: the final fitted pipeline, saved so predict.py can predict new data without training
+    model_path = config.get("output", {}).get("model_path", "models/model.joblib")
+    os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
+    pipeline.set_params(memory=None)                # the cache folder is deleted below; the saved model doesn't need it
+    joblib.dump(pipeline, model_path)
+    report += f"Saved model: {model_path}\n"
+
     # week 9: predictions for new, unlabelled rows (e.g. adult_new.csv), from the refit pipeline.
     # Same cleaning as the training file, but no drop_duplicate_rows(): every row needs a prediction.
     predict_config = config.get("predict") or {}
@@ -220,6 +233,7 @@ def main(config_path: str = "config.yaml"):
     row = {"run": run, "data": config["data"]["path"], "model": model_type, "tuned": tuning_enabled,
            "feature_selection": selection_label,
            "encoder": config["preprocessing"]["encoder"], "scaler": config["preprocessing"]["scaler"],
+           "imputer": imputer,
            "params": str(config["model"].get("params")), "tuned_params": str(study.best_params) if tuning_enabled else "",
            "metric": selection_metric, "mean": final_scores["validation"].mean(),
            "std": final_scores["validation"].std(ddof=1), "untuned": untuned, "floor": floor,
@@ -227,8 +241,9 @@ def main(config_path: str = "config.yaml"):
     runs = save_scores(config.get("output", {}).get("scoreboard", "results/runs.csv"), row)
     same = runs[(runs["data"] == row["data"]) & (runs["metric"] == selection_metric)].copy()
     same["feature_selection"] = same["feature_selection"].fillna("off")   # runs before week 8
+    same["imputer"] = same["imputer"].fillna("median")                    # runs before week 10
     board = (same.sort_values("mean", ascending=False)
-             [["run", "model", "tuned", "feature_selection", "encoder", "scaler", "mean", "std", "untuned", "floor"]]
+             [["run", "model", "tuned", "feature_selection", "imputer", "encoder", "scaler", "mean", "std", "untuned", "floor"]]
              .rename(columns={"mean": selection_metric})
              .to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     print(f"\nScoreboard (runs on the same data and metric; best first)\n{board}")
@@ -237,6 +252,7 @@ def main(config_path: str = "config.yaml"):
     path = save_run(config.get("output", {}).get("results_dir", "results"), run, config, report)
     print(f"\n{refit}\nFull report (per-fold tables, tuning, confusion matrix, fairness): {path}")
     print(kept_line)
+    print(f"Saved model: {model_path}   (python predict.py <input.csv> [output.csv])")
     if predictions_line:
         print(predictions_line)
 

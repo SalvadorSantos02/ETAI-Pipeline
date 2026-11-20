@@ -46,7 +46,12 @@ preprocessing:
   # with no pattern: impute only.
   mnar_indicator_sources: ["occupation"]
   imputation:
+    # Week 10: the numeric imputer, applied after scaling. median | mean | knn | iterative (MICE,
+    # one completed dataset) | random_forest (missForest). None of them sees the target.
     numeric_strategy: "median"
+    n_neighbors: 5            # knn
+    max_iter: 10              # iterative, random_forest
+    n_estimators: 50          # random_forest: trees per column model
     categorical_strategy: "most_frequent"
 
 test_set:
@@ -173,6 +178,7 @@ feature_selection:
 output:
   results_dir: "results/adult"            # its own folder, so the scoreboard never mixes problems
   scoreboard: "results/adult/runs.csv"
+  model_path: "models/adult/model.joblib"   # week 10: its own file, so the COMPAS model is never overwritten
 
 # week 9: the final model's predictions for the 2,000 new people (no target). Same cleaning, no
 # duplicate dropping: rows out = rows in.
